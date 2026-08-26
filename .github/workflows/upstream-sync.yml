@@ -77,10 +77,17 @@ jobs:
           # Prefer a PAT (works on cron); fall back to GITHUB_TOKEN (dispatch only).
           export GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
 
-          N=$(gh pr list --head sync/upstream --json number -q '.[0].number')
+          if ! N=$(gh pr list --head sync/upstream --json number -q '.[0].number' 2>/tmp/pr.err); then
+            echo "::warning::gh pr list failed: $(cat /tmp/pr.err)"
+            N=""
+          fi
           if [ -z "$N" ]; then
-            gh pr create --repo babyLegionite/ds4 --base main --head sync/upstream \
-              --title "sync: upstream antirez/ds4" --body "$BODY"
+            if ! gh pr create --repo babyLegionite/ds4 --base main --head sync/upstream \
+              --title "sync: upstream antirez/ds4" --body "$BODY" 2>/tmp/pr.err; then
+              echo "::warning::PR creation failed (branch sync/upstream IS pushed): $(cat /tmp/pr.err)"
+              echo "::warning::Add a classic PAT with 'repo' scope as the SYNC_TOKEN secret to auto-create the PR from cron."
+            fi
           else
-            gh pr comment "$N" --body "$BODY"
+            gh pr comment "$N" --body "$BODY" 2>/tmp/pr.err || \
+              echo "::warning::PR comment failed: $(cat /tmp/pr.err)"
           fi
