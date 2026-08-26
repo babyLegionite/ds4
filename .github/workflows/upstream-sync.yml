@@ -1,12 +1,17 @@
 name: upstream-sync
 # Keep this fork current with antirez/ds4 WITHOUT ever replacing the pinned
-# runtime. On schedule (and on manual dispatch) it fetches upstream/main and
-# opens (or updates) a sync PR. It NEVER auto-merges — the PR is for review;
+# runtime. On schedule (Wed + Sun) and on manual dispatch it fetches upstream/main
+# and opens (or updates) a sync PR. It NEVER auto-merges — the PR is for review;
 # only then is the runtime pin (DS4_COMMIT) bumped deliberately.
+#
+# NOTE (fixed 2026-08-26): the schedule-triggered GITHUB_TOKEN is read-only for
+# pull-requests, so creating the PR from the cron requires a PAT. Set a classic
+# PAT with `repo` scope as the SYNC_TOKEN secret. If SYNC_TOKEN is absent, the
+# workflow falls back to GITHUB_TOKEN (works on manual dispatch, not cron).
 
 on:
   schedule:
-    - cron: '30 4 * * *'        # 04:30 UTC daily (~22:30 MT)
+    - cron: '30 4 * * 0,3'        # 04:30 UTC Wed + Sun (~22:30 MT)
   workflow_dispatch: {}
 
 permissions:
@@ -37,8 +42,14 @@ jobs:
       - name: Open / update sync PR (never auto-merge)
         if: steps.div.outputs.behind > '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # checkout@v4 sets no git identity, so a merge commit would fail with
+          # "Committer identity unknown". Set it explicitly before merging.
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
           BODY=$(cat <<EOF
           Upstream \`antirez/ds4\` is ahead by ${{ steps.div.outputs.behind }} commit(s).
           $(cat /tmp/body.txt)
@@ -47,12 +58,29 @@ jobs:
           (\`DS4_COMMIT\`) deliberately. Any conflicts must be resolved by hand.
           EOF
           )
-          git checkout -b sync/upstream upstream/main || git checkout sync/upstream
-          git merge --no-edit origin/main || git merge --abort || true
+
+          git checkout -b sync/upstream upstream/main 2>/dev/null || git checkout sync/upstream 2>/dev/null
+          # Make sure the branch tracks origin (not upstream/main) so gh resolves
+          # the head repo to this fork and not antirez/ds4.
+          git branch --set-upstream-to=origin/sync/upstream sync/upstream 2>/dev/null || true
+
+          if git merge --no-edit origin/main 2>/tmp/merge.err; then
+            echo "merge ok"
+          else
+            echo "merge failed (will push upstream/main unmerged for review):"
+            cat /tmp/merge.err
+            git merge --abort 2>/dev/null || true
+          fi
+
           git push -f origin sync/upstream
+
+          # Prefer a PAT (works on cron); fall back to GITHUB_TOKEN (dispatch only).
+          export GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
+
           N=$(gh pr list --head sync/upstream --json number -q '.[0].number')
           if [ -z "$N" ]; then
-            gh pr create --base main --head sync/upstream --title "sync: upstream antirez/ds4" --body "$BODY"
+            gh pr create --repo babyLegionite/ds4 --base main --head sync/upstream \
+              --title "sync: upstream antirez/ds4" --body "$BODY"
           else
             gh pr comment "$N" --body "$BODY"
           fi
