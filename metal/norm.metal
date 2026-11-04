@@ -16,7 +16,7 @@ struct ds4_metal_args_norm {
 // RMSNorm over one activation row, optionally fusing the learned weight
 // multiply. DS4 calls this before attention, before the FFN, and for plain
 // diagnostics that need normalized but unweighted rows.
-template <typename T, short F>
+template <typename T, short F, bool R = false>
 kernel void kernel_rms_norm_fuse_impl(
         constant ds4_metal_args_norm & args,
         device const char * src0,
@@ -66,15 +66,10 @@ kernel void kernel_rms_norm_fuse_impl(
 
     device T * y = (device T *) (dst + i03*args.nb3 + i02*args.nb2 + i01*args.nb1);
     for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
-        if (F == 1) {
-            y[i00] = (x[i00]*scale);
-        }
-        if (F == 2) {
-            y[i00] = (x[i00]*scale)*f0[i00];
-        }
-        if (F == 3) {
-            y[i00] = (x[i00]*scale)*f0[i00] + f1[i00];
-        }
+        T v = x[i00]*scale;
+        if (F == 2) v = v*f0[i00];
+        if (F == 3) v = v*f0[i00] + f1[i00];
+        y[i00] = R ? ds4_bf16_round(v) : v;
     }
 }
 
@@ -83,6 +78,7 @@ typedef decltype(kernel_rms_norm_fuse_impl<float4, 1>) kernel_rms_norm_fuse_t;
 // Host-visible RMSNorm variants: plain norm and norm multiplied by weight.
 template [[host_name("kernel_rms_norm_f32_4")]]     kernel kernel_rms_norm_fuse_t kernel_rms_norm_fuse_impl<float4, 1>;
 template [[host_name("kernel_rms_norm_mul_f32_4")]] kernel kernel_rms_norm_fuse_t kernel_rms_norm_fuse_impl<float4, 2>;
+template [[host_name("kernel_rms_norm_mul_f32_4_bf16")]] kernel kernel_rms_norm_fuse_t kernel_rms_norm_fuse_impl<float4, 2, true>;
 
 kernel void kernel_add_rms_norm_mul_f32_4(
         constant ds4_metal_args_norm & args,
@@ -175,6 +171,7 @@ struct ds4_metal_args_qkv_rms_norm {
     uint64_t q_row_stride;
     uint64_t kv_row_stride;
     float    eps;
+    uint32_t tasks;   /* bit 0: q task, bit 1: kv task (0 = both) */
 };
 
 // Normalizes DS4's q-lora row and KV row in one dispatch.  The two reductions
@@ -274,6 +271,9 @@ kernel void kernel_dsv4_qkv_rms_norm_kv_rope_fp8_store_f32(
 
     const uint row = tgpig.x;
     const bool kv_task = tgpig.y != 0;
+    if (args.tasks != 0u && (args.tasks & (kv_task ? 2u : 1u)) == 0u) {
+        return;
+    }
     const int n = kv_task ? args.kv_n : args.q_n;
     const int n4 = kv_task ? args.kv_n4 : args.q_n4;
     const uint64_t row_stride4 = (kv_task ? args.kv_row_stride : args.q_row_stride) / sizeof(float4);
